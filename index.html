@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>家系図メーカー（IndexedDB保存・シングルHTML）</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#fff; --ink:#1f2937; --muted:#6b7280; --accent:#2563eb;
+    --line:#c7cedb; --node:#111827; --node-bg:#ffffff; --node-border:#94a3b8;
+  }
+  html,body{height:100%;}
+  body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:var(--bg); color:var(--ink);} 
+  header{position:sticky; top:0; z-index:10; background:linear-gradient(180deg, #fff, rgba(255,255,255,.8)); border-bottom:1px solid #e5e7eb;}
+  .wrap{max-width:1100px; margin:0 auto; padding:12px 16px;}
+  h1{font-size:20px; margin:8px 0;}
+  .grid{display:grid; grid-template-columns:320px 1fr; gap:16px; align-items:start;}
+  .card{background:var(--card); border:1px solid #e5e7eb; border-radius:14px; box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .card h2{font-size:16px; margin:0; padding:12px 14px; border-bottom:1px solid #eef2f7;}
+  .card .body{padding:12px 14px;}
+  label{display:block; font-size:12px; color:var(--muted); margin:8px 0 6px;}
+  input, select, button, textarea{font:inherit;}
+  input[type="text"], select{width:100%; box-sizing:border-box; padding:10px 12px; border-radius:10px; border:1px solid #d1d5db; background:#fff;}
+  .row{display:flex; gap:8px;}
+  .row > *{flex:1;}
+  .btn{cursor:pointer; border:1px solid #cfd6e4; background:#fff; border-radius:999px; padding:10px 14px; transition:.15s;}
+  .btn:hover{transform:translateY(-1px); box-shadow:0 6px 14px -8px rgba(37,99,235,.5)}
+  .btn.primary{background:var(--accent); color:#fff; border-color:transparent;}
+  .btn.ghost{background:#fff;}
+  .stack{display:flex; flex-wrap:wrap; gap:8px;}
+  .muted{color:var(--muted); font-size:12px}
+  .list{display:grid; grid-template-columns:1fr auto; gap:6px; align-items:center;}
+  .pill{display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border:1px solid #e5e7eb; background:#fff;}
+  .pill b{font-weight:600}
+  .canvas-wrap{position:relative; background:#fff; border:1px solid #e5e7eb; border-radius:14px; overflow:hidden;}
+  .toolbar{display:flex; gap:8px; padding:10px; border-bottom:1px solid #eef2f7; background:#fafbff;}
+  .viewport{overflow:auto; height:70vh;}
+  svg{background:#fff; width:100%; height:100%;}
+  .node{fill:var(--node-bg); stroke:var(--node-border); stroke-width:1;}
+  .node text{font-size:13px; fill:var(--node);}
+  .edge{stroke:var(--line); stroke-width:2;}
+  .level-label{font-size:12px; fill:#9ca3af}
+  .footer{padding:8px 14px; border-top:1px solid #eef2f7; font-size:12px; color:var(--muted)}
+  .hr{height:1px; background:#eef2f7; margin:8px 0}
+</style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>家系図メーカー（IndexedDB保存）</h1>
+      <div class="muted">名前を追加 → 親子関係を登録 → <b>最下段の子を基点</b>にして上に辿る（基準人物は手動選択も可・未選択なら自動）。画像出力もできます。</div>
+    </div>
+  </header>
+
+  <div class="wrap grid">
+    <!-- 左：編集パネル -->
+    <section class="card">
+      <h2>編集</h2>
+      <div class="body">
+        <label>名前の追加</label>
+        <div class="row">
+          <input id="nameInput" type="text" placeholder="例）田中 太郎" />
+          <button class="btn primary" id="addPersonBtn">追加</button>
+        </div>
+        <div class="hr"></div>
+
+        <label>親子関係の追加</label>
+        <div class="row">
+          <select id="parentSelect"></select>
+          <select id="childSelect"></select>
+        </div>
+        <div class="stack" style="margin-top:8px">
+          <button class="btn" id="addRelationBtn">親 → 子 を登録</button>
+          <button class="btn ghost" id="deleteRelationBtn">選択した関係を削除</button>
+        </div>
+        <div class="hr"></div>
+
+        <label>基準人物（子ども側・最下段・未選択なら自動）</label>
+        <div class="row">
+          <select id="rootSelect"></select>
+          <button class="btn" id="autoPickRootBtn">子（最下段）を自動選択</button>
+        </div>
+
+        <div class="hr"></div>
+        <div class="stack">
+          <button class="btn" id="saveBtn">保存（手動）</button>
+          <button class="btn" id="loadBtn">読込</button>
+          <button class="btn" id="resetBtn">全消去</button>
+        </div>
+        <p class="muted">※ 追加・変更時に自動保存も行います。</p>
+
+        <div class="hr"></div>
+        <h3 style="font-size:14px; margin:4px 0 8px">登録済みの人物</h3>
+        <div id="peopleList" class="list"></div>
+
+        <div class="hr"></div>
+        <h3 style="font-size:14px; margin:4px 0 8px">登録済みの親子関係</h3>
+        <div id="relationsList" class="list"></div>
+      </div>
+      <div class="footer">IndexedDB: familyTreeDB / store: kv / key: graph</div>
+    </section>
+
+    <!-- 右：図エリア -->
+    <section class="card canvas-wrap">
+      <div class="toolbar">
+        <button class="btn" id="relayoutBtn">レイアウト再計算</button>
+        <button class="btn" id="fitBtn">表示をフィット</button>
+        <div style="flex:1"></div>
+        <button class="btn" id="exportSVGBtn">SVGを保存</button>
+        <button class="btn" id="exportPNGBtn">PNGを保存</button>
+        <button class="btn" id="printBtn">印刷</button>
+      </div>
+      <div class="viewport" id="viewport">
+        <svg id="svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </section>
+  </div>
+
+<script>
+/*************************************************
+ * データモデル & IndexedDB ラッパ
+ *************************************************/
+const DB_NAME = 'familyTreeDB';
+const STORE = 'kv';
+const KEY = 'graph';
+
+const defaultState = { people: [], relations: [], rootId: null };
+let state = structuredClone(defaultState);
+
+function uid(){ return Math.random().toString(36).slice(2,10); }
+
+function openDB(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = (e)=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains(STORE)){
+        db.createObjectStore(STORE);
+      }
+    };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+async function kvGet(key){
+  const db = await openDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readonly');
+    const st = tx.objectStore(STORE);
+    const g = st.get(key);
+    g.onsuccess = ()=> resolve(g.result);
+    g.onerror = ()=> reject(g.error);
+  });
+}
+
+async function kvSet(key, value){
+  const db = await openDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readwrite');
+    const st = tx.objectStore(STORE);
+    const p = st.put(value, key);
+    p.onsuccess = ()=> resolve();
+    p.onerror = ()=> reject(p.error);
+  });
+}
+
+async function kvDelete(key){
+  const db = await openDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction(STORE, 'readwrite');
+    const st = tx.objectStore(STORE);
+    const p = st.delete(key);
+    p.onsuccess = ()=> resolve();
+    p.onerror = ()=> reject(p.error);
+  });
+}
+
+/*************************************************
+ * UI 要素参照
+ *************************************************/
+const nameInput = document.getElementById('nameInput');
+const addPersonBtn = document.getElementById('addPersonBtn');
+const parentSelect = document.getElementById('parentSelect');
+const childSelect = document.getElementById('childSelect');
+const addRelationBtn = document.getElementById('addRelationBtn');
+const deleteRelationBtn = document.getElementById('deleteRelationBtn');
+const rootSelect = document.getElementById('rootSelect');
+const autoPickRootBtn = document.getElementById('autoPickRootBtn');
+const saveBtn = document.getElementById('saveBtn');
+const loadBtn = document.getElementById('loadBtn');
+const resetBtn = document.getElementById('resetBtn');
+const peopleList = document.getElementById('peopleList');
+const relationsList = document.getElementById('relationsList');
+const svg = document.getElementById('svg');
+const viewport = document.getElementById('viewport');
+const relayoutBtn = document.getElementById('relayoutBtn');
+const fitBtn = document.getElementById('fitBtn');
+const exportSVGBtn = document.getElementById('exportSVGBtn');
+const exportPNGBtn = document.getElementById('exportPNGBtn');
+const printBtn = document.getElementById('printBtn');
+
+/*************************************************
+ * 便利関数
+ *************************************************/
+function autoSave(){ save().catch(console.error); }
+
+function save(){
+  return kvSet(KEY, JSON.stringify(state));
+}
+
+async function load(){
+  const raw = await kvGet(KEY);
+  if(raw){
+    try{ state = JSON.parse(raw); }
+    catch{ state = structuredClone(defaultState); }
+  }else{
+    state = structuredClone(defaultState);
+  }
+  renderAll();
+}
+
+function resetAll(){
+  if(!confirm('保存データを全て削除します。よろしいですか？')) return;
+  state = structuredClone(defaultState);
+  kvDelete(KEY).finally(renderAll);
+}
+
+function optionize(sel, items, getLabel){
+  sel.innerHTML = '';
+  const optNone = document.createElement('option');
+  optNone.value = '';
+  optNone.textContent = '（選択してください）';
+  sel.appendChild(optNone);
+  for(const it of items){
+    const op = document.createElement('option');
+    op.value = it.id;
+    op.textContent = getLabel? getLabel(it): it.name;
+    sel.appendChild(op);
+  }
+}
+
+/*************************************************
+ * データ操作
+ *************************************************/
+function addPerson(name){
+  if(!name || !name.trim()) return;
+  const p = { id: uid(), name: name.trim() };
+  state.people.push(p);
+  autoSave();
+  renderAll();
+}
+
+function removePerson(id){
+  state.people = state.people.filter(p=>p.id!==id);
+  state.relations = state.relations.filter(r=> r.parent!==id && r.child!==id);
+  if(state.rootId===id) state.rootId = null;
+  autoSave();
+  renderAll();
+}
+
+function addRelation(parentId, childId){
+  if(!parentId || !childId || parentId===childId) return;
+  // 重複防止
+  if(state.relations.some(r=> r.parent===parentId && r.child===childId)) return;
+  state.relations.push({ id: uid(), parent: parentId, child: childId });
+  autoSave();
+  renderAll();
+}
+
+function deleteRelationByIds(parentId, childId){
+  state.relations = state.relations.filter(r=> !(r.parent===parentId && r.child===childId));
+  autoSave();
+  renderAll();
+}
+
+/*************************************************
+ * ルート自動選択：親として誰からも指されない人
+ *************************************************/
+function autoPickRoot(){
+  // 下から上：子（=子を持たない人物）の中から、最も祖先が多い“最深”の子を選ぶ
+  const parentMap = {}; const childrenMap = {};
+  for(const r of state.relations){
+    (parentMap[r.child] ||= []).push(r.parent);
+    (childrenMap[r.parent] ||= []).push(r.child);
+  }
+  const allIds = new Set(state.people.map(p=>p.id));
+  const leaves = [...allIds].filter(id => !(id in childrenMap) || (childrenMap[id]||[]).length===0);
+  if(leaves.length===0){ state.rootId = state.people[0]?.id || null; autoSave(); renderAll(); return; }
+  function countAncestors(id){
+    const seen=new Set(); const stack=[id];
+    while(stack.length){ const x=stack.pop(); for(const p of (parentMap[x]||[])){ if(!seen.has(p)){ seen.add(p); stack.push(p);} } }
+    return seen.size;
+  }
+  let best = leaves[0], bestScore = -1;
+  for(const leaf of leaves){ const s = countAncestors(leaf); if(s>bestScore){ bestScore=s; best=leaf; } }
+  state.rootId = best; autoSave(); renderAll();
+}
+
+/*************************************************
+ * レイアウト（簡易ツリー）
+ * ルートから子方向にBFSしてレベル分け → 各レベルで横位置を均等配置
+ *************************************************/
+// すべての関係者を表示：複数ルート対応のレベル構築
+// すべての関係者を表示：複数ルート対応のレベル構築
+// すべての関係者を表示：複数ルート対応のレベル構築
+function buildTreeAll(parentMap, childrenMap){
+  const allIds = new Set(state.people.map(p=>p.id));
+  const roots = [];
+  for(const id of allIds){
+    const parents = parentMap[id]||[];
+    if(parents.length===0) roots.push(id);
+  }
+  if(roots.length===0){
+    const parentOnly = new Set();
+    for(const r of state.relations){ parentOnly.add(r.parent); }
+    roots.push(...parentOnly);
+  }
+  const levelOf = new Map();
+  const q = [...roots];
+  for(const id of q){ levelOf.set(id, 0); }
+  while(q.length){
+    const id = q.shift();
+    const myLevel = levelOf.get(id) ?? 0;
+    const kids = childrenMap[id]||[];
+    for(const c of kids){
+      const prev = levelOf.get(c);
+      const next = Math.max(prev ?? -Infinity, myLevel + 1);
+      if(prev===undefined || next>prev){
+        levelOf.set(c, next);
+        q.push(c);
+      }
+    }
+  }
+  for(const id of allIds){ if(!levelOf.has(id)) levelOf.set(id, 0); }
+
+  // 複数親の子は、必ず親より下へ（親の最大レベル+1）
+  let changed = true; let safety = 0;
+  while(changed && safety < 50){
+    changed = false; safety++;
+    for(const [child, parents] of Object.entries(parentMap)){
+      if(!parents || parents.length === 0) continue;
+      const parentLevels = parents.map(p=> levelOf.get(p) ?? 0);
+      const maxParentLevel = Math.max(...parentLevels);
+      const cur = levelOf.get(child) ?? 0;
+      if(cur <= maxParentLevel){
+        levelOf.set(child, maxParentLevel + 1);
+        changed = true;
+      }
+    }
+  }
+
+  const maxL = Math.max(...levelOf.values());
+  const levels = Array.from({length: maxL+1}, ()=>[]);
+  for(const [id,l] of levelOf.entries()){ levels[l].push(id); }
+  return {levels};
+}
+
+// 全体表示 + 共同親揃え（親同士同段）+ 子は親最大+1 による安定配置
+function buildTreeAllBalanced(parentMap, childrenMap){
+  // まず既存の buildTreeAll で大まかに段を割り当て
+  const base = buildTreeAll(parentMap, childrenMap);
+  const levelOf = new Map();
+  base.levels.forEach((row,i)=> row.forEach(id=> levelOf.set(id, i)));
+
+  // 共同親の水平合わせ & 子は親最大+1 を満たすまで反復
+  let changed = true, guard = 0;
+  while(changed && guard < 100){
+    changed = false; guard++;
+
+    // 親同士の同段化（同じ子を持つ親は同じ段）
+    for(const [child, parents] of Object.entries(parentMap)){
+      if(!parents || parents.length <= 1) continue;
+      const curMax = Math.max(...parents.map(p=> levelOf.get(p) ?? 0));
+      for(const p of parents){
+        const lp = levelOf.get(p) ?? 0;
+        if(lp < curMax){ levelOf.set(p, curMax); changed = true; }
+      }
+    }
+
+    // 子は 親の最大レベル+1 以上（親より下）
+    for(const [child, parents] of Object.entries(parentMap)){
+      if(!parents || parents.length === 0) continue;
+      const maxP = Math.max(...parents.map(p=> levelOf.get(p) ?? 0));
+      const cur = levelOf.get(child) ?? 0;
+      if(cur <= maxP){ levelOf.set(child, maxP + 1); changed = true; }
+    }
+  }
+
+  // レベル配列を再構成（全員を含める）
+  const allIds = new Set(state.people.map(p=>p.id));
+  const maxL = Math.max(0, ...levelOf.values());
+  const out = Array.from({length: maxL+1}, ()=>[]);
+  for(const [id,l] of levelOf.entries()){ out[l].push(id); }
+  for(const id of allIds){ if(!levelOf.has(id)) out[0].push(id); } // どこからも繋がらない人も表示
+
+  return {levels: out};
+}
+
+
+// 基準人物（focusId）を最下段に固定し、親方向に1段ずつ上へ積む
+function buildUpwardTree(focusId, parentMap, childrenMap){
+  if(!focusId) return {levels:[]};
+
+  // 1) 基準人物から上方向に到達可能なノード集合Rを作る
+  const reachable = new Set();
+  const stack = [focusId];
+  while(stack.length){
+    const id = stack.pop();
+    if(reachable.has(id)) continue;
+    reachable.add(id);
+    const ps = parentMap[id] || [];
+    for(const p of ps){ if(!reachable.has(p)) stack.push(p); }
+  }
+
+  // 2) 初期化：全ノード∞、本人0（"下"）。genが小さいほど"下"。
+  const INF = 1e9;
+  const gens = new Map();
+  for(const id of reachable) gens.set(id, INF);
+  gens.set(focusId, 0);
+
+  // 3) 上方向緩和：親 <= 子+1 を満たすよう最小化（Bellman-Ford風）
+  let changed = true, guard = 0;
+  while(changed && guard < 100){
+    changed = false; guard++;
+    for(const child of reachable){
+      const gc = gens.get(child);
+      if(gc === INF) continue;
+      const parents = parentMap[child] || [];
+      for(const p of parents){
+        const cand = gc + 1;
+        if(cand < (gens.get(p) ?? INF)){
+          gens.set(p, cand);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  // 4) 兄弟そろえ：各親pの全子kについて k >= p-1 かつ できるだけ下に（=小さく）
+  //    → k を min(現状, p-1) に更新（負にならないよう0で打ち止め）
+  changed = true; guard = 0;
+  while(changed && guard < 100){
+    changed = false; guard++;
+    for(const p of reachable){
+      const gp = gens.get(p);
+      if(gp === INF) continue;
+      const kids = childrenMap[p] || [];
+      for(const k of kids){
+        if(!reachable.has(k)) continue;
+        const target = Math.max(0, gp - 1);
+        if(target < (gens.get(k) ?? INF)){
+          gens.set(k, target);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  // 5) 再度 上方向緩和で親を子+1の最小にそろえる（Dが上に行き過ぎる問題の是正）
+  changed = true; guard = 0;
+  while(changed && guard < 100){
+    changed = false; guard++;
+    for(const child of reachable){
+      const gc = gens.get(child);
+      if(gc === INF) continue;
+      const parents = parentMap[child] || [];
+      for(const p of parents){
+        const cand = gc + 1; // 親は子より1段上（最小）
+        if(cand < (gens.get(p) ?? INF)){
+          gens.set(p, cand);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  // 6) 正規化：基準人物が必ず0になるよう全体を平行移動し、負は0に丸め
+  const base = gens.get(focusId) ?? 0;
+  for(const id of reachable){
+    const g = gens.get(id);
+    gens.set(id, Math.max(0, g - base));
+  }
+
+  // 7) バケツ化（genが大きいほど上段）。描画は上→下なので降順に並べる
+  let maxGen = 0; for(const g of gens.values()) maxGen = Math.max(maxGen, g);
+  const buckets = Array.from({length: maxGen+1}, ()=>[]);
+  for(const [id,g] of gens.entries()){ buckets[g].push(id); }
+  const levels = [];
+  for(let g=maxGen; g>=0; g--) levels.push(buckets[g]);
+  return {levels};
+}
+
+function layoutPositions(levels, opt={}, parentMap={}){
+  const width = opt.width||1200, height = opt.height||800;
+  const marginX = 40, marginY = 90;
+  const nodeW = 160, nodeH = 50; // 少し広めにして重なりを防ぐ
+  const positions = {}; // id -> {x,y}
+
+  // レベルごとのY配置
+  let y = 60;
+  for(let li=0; li<levels.length; li++){
+    const row = levels[li];
+
+    // 1) 初期X：
+    //   ルート階層は均等配置。以降は親の平均Xを使い、親が無い場合は仮で均等配置。
+    let xs = new Map();
+    if(li===0){
+      const count = row.length; const totalW = Math.max(count*nodeW + (count-1)*marginX, 200);
+      let x = (width-totalW)/2 + nodeW/2;
+      for(const id of row){ xs.set(id, x); x += nodeW + marginX; }
+    }else{
+      // 親平均
+      for(const id of row){
+        const parents = parentMap[id]||[];
+        if(parents.length>0){
+          const sum = parents.filter(p=>positions[p]).reduce((a,p)=> a + (positions[p].x), 0);
+          const avg = parents.filter(p=>positions[p]).length ? sum / parents.filter(p=>positions[p]).length : null;
+          if(avg!=null) xs.set(id, avg);
+        }
+      }
+      // 親が見つからない or 平均が出せないノードは仮の均等配置
+      const missing = row.filter(id=> !xs.has(id));
+      if(missing.length){
+        const count = missing.length; const totalW = Math.max(count*nodeW + (count-1)*marginX, 200);
+        let x = (width-totalW)/2 + nodeW/2;
+        for(const id of missing){ xs.set(id, x); x += nodeW + marginX; }
+      }
+    }
+
+    // 2) 衝突解消スイープ：左→右に走査して最小間隔を保証
+    const minGap = nodeW + marginX;
+    const ordered = [...row].sort((a,b)=> (xs.get(a)||0) - (xs.get(b)||0));
+    for(let i=0;i<ordered.length;i++){
+      const id = ordered[i];
+      if(i===0) continue;
+      const prev = ordered[i-1];
+      const prevX = xs.get(prev);
+      const x = xs.get(id);
+      if(x - prevX < minGap){
+        xs.set(id, prevX + minGap);
+      }
+    }
+
+    // 3) 中央寄せ：行の中心がSVG中央に近づくよう平行移動
+    const firstX = xs.get(ordered[0]);
+    const lastX = xs.get(ordered[ordered.length-1]);
+    const rowCenter = (firstX + lastX) / 2;
+    const targetCenter = width/2;
+    const dx = targetCenter - rowCenter;
+
+    for(const id of row){
+      positions[id] = { x: (xs.get(id) + dx), y };
+    }
+
+    y += nodeH + marginY;
+  }
+
+  return {positions, nodeW, nodeH};
+}
+
+function renderSVG(){
+  svg.innerHTML = '';
+  const vb = svg.viewBox.baseVal;
+  const W = vb.width||1200, H = vb.height||800;
+
+  // 背景（白）
+  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  bg.setAttribute('x','0'); bg.setAttribute('y','0');
+  bg.setAttribute('width', String(W)); bg.setAttribute('height', String(H));
+  bg.setAttribute('fill', '#ffffff');
+  svg.appendChild(bg);
+
+  // マップ構築（下から上のため先に作る）
+  const parentMap = {}; // child -> parents
+  const childrenMap = {}; // parent -> children
+  for(const r of state.relations){
+    (parentMap[r.child] ||= []).push(r.parent);
+    (childrenMap[r.parent] ||= []).push(r.child);
+  }
+
+  // 基準人物（最下段の子）を自動選択：未選択時のみ
+  if(!state.rootId){
+    const allIds = new Set(state.people.map(p=>p.id));
+    const leaves = [...allIds].filter(id => !(id in childrenMap) || (childrenMap[id]||[]).length===0);
+    if(leaves.length>0){
+      function countAncestors(id){
+        const seen=new Set(); const stack=[id];
+        while(stack.length){ const x=stack.pop(); for(const p of (parentMap[x]||[])){ if(!seen.has(p)){seen.add(p); stack.push(p);} } }
+        return seen.size;
+      }
+      let best = leaves[0], bestScore = -1;
+      for(const leaf of leaves){ const s=countAncestors(leaf); if(s>bestScore){bestScore=s; best=leaf;} }
+      state.rootId = best; autoSave();
+    }
+  }
+
+  // レベル構築：下から上
+  const {levels} = buildTreeAllBalanced(parentMap, childrenMap);
+
+
+  const {positions, nodeW, nodeH} = layoutPositions(levels, {width: W, height:H}, parentMap);
+  const byId = Object.fromEntries(state.people.map(p=>[p.id,p]));
+
+  // edges（線）
+  const gEdges = document.createElementNS('http://www.w3.org/2000/svg','g');
+  gEdges.setAttribute('fill','none');
+  gEdges.setAttribute('stroke-linecap','round');
+  svg.appendChild(gEdges);
+  for(const rel of state.relations){
+    if(!positions[rel.parent] || !positions[rel.child]) continue;
+    const a = positions[rel.parent];
+    const b = positions[rel.child];
+    const x1 = a.x, y1 = a.y + nodeH;
+    const x2 = b.x, y2 = b.y;
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    const midY = (y1+y2)/2;
+    path.setAttribute('d', `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`);
+    path.setAttribute('stroke', '#c7cedb');
+    path.setAttribute('stroke-width', '2');
+    gEdges.appendChild(path);
+  }
+
+  // nodes（人物）
+  const gNodes = document.createElementNS('http://www.w3.org/2000/svg','g');
+  svg.appendChild(gNodes);
+  for(const id of Object.keys(positions)){
+    const {x,y} = positions[id];
+    const person = byId[id];
+
+    const group = document.createElementNS('http://www.w3.org/2000/svg','g');
+    group.setAttribute('transform', `translate(${x - nodeW/2}, ${y})`);
+
+    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x', '0'); rect.setAttribute('y', '0');
+    rect.setAttribute('rx', '10'); rect.setAttribute('ry', '10');
+    rect.setAttribute('width', String(nodeW)); rect.setAttribute('height', String(nodeH));
+    rect.setAttribute('fill', '#ffffff');
+    rect.setAttribute('stroke', '#94a3b8');
+    rect.setAttribute('stroke-width', '1');
+    if(id===state.rootId){ rect.setAttribute('stroke', '#2563eb'); rect.setAttribute('stroke-width','2'); }
+    group.appendChild(rect);
+
+    const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+    text.setAttribute('x', String(nodeW/2));
+    text.setAttribute('y', String(nodeH/2 + 4));
+    text.setAttribute('text-anchor','middle');
+    text.setAttribute('dominant-baseline','middle');
+    text.setAttribute('font-size', '13');
+    text.setAttribute('fill', '#111827');
+    text.textContent = person?.name || '(不明)';
+    group.appendChild(text);
+
+    gNodes.appendChild(group);
+  }
+}
+
+// 親をたどって最上位へ遡る（共同親がいる場合は先頭を採用）
+function climbToTop(nodeId, parentMap){
+  if(!nodeId) return null;
+  let cur = nodeId;
+  const guard = new Set();
+  while(parentMap[cur] && parentMap[cur].length){
+    if(guard.has(cur)) break; // ループ保護
+    guard.add(cur);
+    cur = parentMap[cur][0];
+  }
+  return cur;
+}
+
+/*************************************************
+ * 右エリア：エクスポート等
+ *************************************************/
+function fitToContent(){
+  // 現状は viewBox を固定。スクロールで閲覧可能。
+  // 必要であれば将来 pan/zoom を実装。
+  viewport.scrollTo({top:0,left:0, behavior:'smooth'});
+}
+
+function download(filename, blob){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 100);
+}
+
+function exportSVG(){
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+  const xml = new XMLSerializer().serializeToString(clone);
+  const blob = new Blob([xml], {type:'image/svg+xml'});
+  download('family-tree.svg', blob);
+}
+
+function exportPNG(){
+  const xml = new XMLSerializer().serializeToString(svg);
+  const svgBlob = new Blob([xml], {type:'image/svg+xml;charset=utf-8'});
+  const url = URL.createObjectURL(svgBlob);
+  const img = new Image();
+  img.onload = ()=>{
+    const vb = svg.viewBox.baseVal; const W = vb.width||1200, H = vb.height||800;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,W,H);
+    ctx.drawImage(img, 0,0, W, H);
+    canvas.toBlob(blob=>{
+      download('family-tree.png', blob);
+      URL.revokeObjectURL(url);
+    }, 'image/png');
+  };
+  img.onerror = ()=> URL.revokeObjectURL(url);
+  img.src = url;
+}
+
+function printSVG(){
+  const w = window.open('', 'printWin');
+  const xml = new XMLSerializer().serializeToString(svg);
+  w.document.write(`<html><head><meta charset='utf-8'><title>家系図を印刷</title></head><body>${xml}</body></html>`);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
+/*************************************************
+ * レンダリング（左パネル）
+ *************************************************/
+function renderPeopleList(){
+  peopleList.innerHTML = '';
+  for(const p of state.people){
+    const name = document.createElement('div');
+    name.textContent = p.name;
+    const actions = document.createElement('div');
+    const del = document.createElement('button');
+    del.className = 'btn';
+    del.textContent = '削除';
+    del.onclick = ()=> removePerson(p.id);
+    actions.appendChild(del);
+    peopleList.appendChild(name);
+    peopleList.appendChild(actions);
+  }
+}
+
+function renderRelationsList(){
+  relationsList.innerHTML = '';
+  const byId = Object.fromEntries(state.people.map(p=>[p.id,p.name]));
+  for(const r of state.relations){
+    const label = document.createElement('div');
+    label.innerHTML = `<span class='pill'><b>親</b> ${byId[r.parent]||'?'} → <b>子</b> ${byId[r.child]||'?'}</span>`;
+    const actions = document.createElement('div');
+    const del = document.createElement('button');
+    del.className = 'btn';
+    del.textContent = '削除';
+    del.onclick = ()=> deleteRelationByIds(r.parent, r.child);
+    actions.appendChild(del);
+    relationsList.appendChild(label);
+    relationsList.appendChild(actions);
+  }
+}
+
+function renderSelectors(){
+  optionize(parentSelect, state.people);
+  optionize(childSelect, state.people);
+  optionize(rootSelect, state.people);
+  if(state.rootId) rootSelect.value = state.rootId;
+}
+
+function renderAll(){
+  renderPeopleList();
+  renderRelationsList();
+  renderSelectors();
+  renderSVG();
+}
+
+/*************************************************
+ * イベント
+ *************************************************/
+addPersonBtn.onclick = ()=>{ addPerson(nameInput.value); nameInput.value=''; nameInput.focus(); };
+nameInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ addPersonBtn.click(); }});
+
+addRelationBtn.onclick = ()=>{
+  addRelation(parentSelect.value, childSelect.value);
+};
+
+autoPickRootBtn.onclick = ()=> autoPickRoot();
+rootSelect.onchange = ()=>{ state.rootId = rootSelect.value || null; autoSave(); renderSVG(); };
+
+deleteRelationBtn.onclick = ()=>{
+  const p = parentSelect.value, c = childSelect.value;
+  if(!p||!c) return;
+  deleteRelationByIds(p,c);
+};
+
+saveBtn.onclick = ()=> save();
+loadBtn.onclick = ()=> load();
+resetBtn.onclick = ()=> resetAll();
+relayoutBtn.onclick = ()=> renderSVG();
+fitBtn.onclick = ()=> fitToContent();
+exportSVGBtn.onclick = ()=> exportSVG();
+exportPNGBtn.onclick = ()=> exportPNG();
+printBtn.onclick = ()=> printSVG();
+
+/*************************************************
+ * 初期化
+ *************************************************/
+load().catch(()=>{ state = structuredClone(defaultState); renderAll(); });
+</script>
+</body>
+</html>

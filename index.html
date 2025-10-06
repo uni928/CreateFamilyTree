@@ -89,6 +89,15 @@
         </div>
         <p class="muted">※ 追加・変更時に自動保存も行います。</p>
 
+<div class="hr"></div>
+<label>データの入出力（JSON）</label>
+<div class="stack">
+  <button class="btn" id="exportJSONBtn">エクスポート(JSON)</button>
+  <button class="btn" id="importJSONBtn">インポート(JSON)</button>
+  <input type="file" id="importFile" accept="application/json" style="display:none" />
+</div>
+<p class="muted">現在の <b>state</b>（people / relations / rootId）をJSONで保存・復元できます。インポート時は「置換 / マージ」を選べます。</p>
+
         <div class="hr"></div>
         <h3 style="font-size:14px; margin:4px 0 8px">登録済みの人物</h3>
         <div id="peopleList" class="list"></div>
@@ -199,6 +208,10 @@ const fitBtn = document.getElementById('fitBtn');
 const exportSVGBtn = document.getElementById('exportSVGBtn');
 const exportPNGBtn = document.getElementById('exportPNGBtn');
 const printBtn = document.getElementById('printBtn');
+// JSON import/export
+const exportJSONBtn = document.getElementById('exportJSONBtn');
+const importJSONBtn = document.getElementById('importJSONBtn');
+const importFile = document.getElementById('importFile');
 
 /*************************************************
  * 便利関数
@@ -686,6 +699,67 @@ function download(filename, blob){
   setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 100);
 }
 
+// データエクスポート(JSON)
+function exportJSON(){
+  const payload = {
+    $schema: 'https://example.com/kakeizu.schema.json',
+    app: 'kakeizu-maker',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    state
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+  download('kakeizu-export.json', blob);
+}
+
+// データインポート(JSON)
+function importJSONFromFile(file){
+  const reader = new FileReader();
+  reader.onload = ()=>{
+    try{
+      const data = JSON.parse(reader.result);
+      // payload.state があればそれを、無ければ素の state 形式を受け入れる
+      const incoming = (data && data.state && Array.isArray(data.state.people)) ? data.state : data;
+      if(!incoming || !Array.isArray(incoming.people) || !Array.isArray(incoming.relations)){
+        alert('このJSONは家系図データとして読み込めません。people / relations が必要です。');
+        return;
+      }
+      const doReplace = confirm('読み込んだデータで現在の家系図を置き換えますか？\n[OK]=置換 / [キャンセル]=マージ');
+
+      if(doReplace){
+        state = {
+          people: [...incoming.people],
+          relations: [...incoming.relations],
+          rootId: incoming.rootId ?? null
+        };
+      }else{
+        // マージ：people は id で統合、relations は parent>child で重複排除
+        const existingPeople = new Map(state.people.map(p=>[p.id,p]));
+        for(const p of incoming.people){
+          if(p && p.id && !existingPeople.has(p.id)) state.people.push(p);
+        }
+        const existingRelKeys = new Set(state.relations.map(r=> `${r.parent}>${r.child}`));
+        for(const r of incoming.relations){
+          if(!r || !r.parent || !r.child) continue;
+          const key = `${r.parent}>${r.child}`;
+          if(!existingRelKeys.has(key)){
+            state.relations.push({ id: r.id || uid(), parent: r.parent, child: r.child });
+            existingRelKeys.add(key);
+          }
+        }
+        if(!state.rootId && incoming.rootId) state.rootId = incoming.rootId;
+      }
+
+      save().then(renderAll);
+    }catch(err){
+      console.error(err);
+      alert('JSONの解析に失敗しました。ファイルの内容をご確認ください。');
+    }
+  };
+  reader.readAsText(file);
+}
+
+
 function exportSVG(){
   const clone = svg.cloneNode(true);
   clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
@@ -802,6 +876,14 @@ fitBtn.onclick = ()=> fitToContent();
 exportSVGBtn.onclick = ()=> exportSVG();
 exportPNGBtn.onclick = ()=> exportPNG();
 printBtn.onclick = ()=> printSVG();
+exportJSONBtn.onclick = ()=> exportJSON();
+importJSONBtn.onclick = ()=> importFile.click();
+importFile.addEventListener('change', (e)=>{
+  const file = e.target.files?.[0];
+  if(file) importJSONFromFile(file);
+  // 同じファイルを続けて選べるように value をクリア
+  e.target.value = '';
+});
 
 /*************************************************
  * 初期化
